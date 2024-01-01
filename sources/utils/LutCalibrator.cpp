@@ -62,8 +62,8 @@ ColorRgb LutCalibrator::primeColors[] = {
 
 #define LUT_FILE_SIZE 50331648
 #define LUT_INDEX(y,u,v) ((y + (u<<8) + (v<<16))*3)
-#define REC(x) (x == 2) ? "REC.601" : (x == 1) ? "REC.709" : "FCC"
-LutCalibrator* LutCalibrator::instance = nullptr;
+#define REC_709_LIMITED_COEFS 3
+#define REC(x) (x == REC_709_LIMITED_COEFS) ? "REC.709(limited)" : (x == 2) ? "REC.601" : (x == 1) ? "REC.709" : "FCC"
 
 
 LutCalibrator::LutCalibrator()
@@ -77,6 +77,7 @@ LutCalibrator::LutCalibrator()
 	_gammaR = 1;
 	_gammaG = 1;
 	_gammaB = 1;
+	_totalFloor = 0;
 	_checksum = -1;
 	_currentCoef = 0;
 	std::fill_n(_coefsResult, sizeof(_coefsResult) / sizeof(double), 0.0);
@@ -173,12 +174,9 @@ void LutCalibrator::incomingCommand(QString rootpath, GrabberWrapper* grabberWra
 
 				BLOCK_CALL_0(grabberWrapper, stop);
 				BLOCK_CALL_0(grabberWrapper, start);
-
-				for (int i = 0; i < 8; i++)
-				{
-					QThread::msleep(200);
-					QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
-				}
+				
+				QThread::msleep(2000);
+				
 				_log->enable();
 			}
 
@@ -227,6 +225,7 @@ void LutCalibrator::stopHandler()
 	_mjpegCalibration = false;
 	_finish = false;
 	_checksum = -1;
+	_totalFloor = 0;
 	_warningCRC = _warningMismatch = -1;
 	std::fill_n(_coefsResult, sizeof(_coefsResult) / sizeof(double), 0.0);
 
@@ -802,7 +801,7 @@ QString LutCalibrator::colorToQStr(ColorRgb color)
 
 QString LutCalibrator::calColorToQStr(capColors index)
 {
-	ColorRgb color = primeColors[(int)index], finalColor;
+	ColorRgb color = primeColors[(int)index], finalColor(0,0,0);
 	ColorStat real = _colorBalance[(int)index];
 
 	uint32_t indexRgb = LUT_INDEX(qRound(real.red), qRound(real.green), qRound(real.blue));
@@ -906,6 +905,7 @@ bool LutCalibrator::correctionEnd()
 		QJsonObject report;
 		report["limited"] = 1;
 		SignalLutCalibrationUpdated(report);
+		_totalFloor = floor;
 
 		return false;
 	}
@@ -1205,7 +1205,7 @@ double LutCalibrator::fineTune(double& optimalRange, double& optimalScale, int& 
 							optimalScale = scale;
 							optimalWhite = whiteIndex;
 							optimalColor = "";
-							for (auto c : colors)
+							for (const auto& c : colors)
 								optimalColor += QString("%1 ,").arg(c);
 							optimalColor += QString(" range: %1, strategy: %2, scale: %3, white: %4, error: %5").arg(optimalRange).arg(optimalStrategy).arg(optimalScale).arg(optimalWhite).arg(currentError);
 						}
@@ -1257,7 +1257,7 @@ bool LutCalibrator::finalize(bool fastTrack)
 		Debug(_log, "Initial mode: %s", (fastTrack) ? "YES" : "NO");
 		Debug(_log, "Using YUV coefs: %s", REC(_currentCoef));
 		Debug(_log, "YUV table range: %s", (_limitedRange) ? "LIMITED" : "FULL");
-
+		Debug(_log, "Total floor => %f", _totalFloor);
 		if (floor <= ceil)
 		{
 			Debug(_log, "Min RGB floor: %f, max RGB ceiling: %f", floor, ceil);
@@ -1279,7 +1279,16 @@ bool LutCalibrator::finalize(bool fastTrack)
 				{
 					double r, g, b;
 
-					if (_limitedRange)
+					if (_limitedRange && _currentCoef == REC_709_LIMITED_COEFS && _totalFloor > 0)
+					{
+						r = y + 2 * (v - 128) * (1 - Kr);
+						g = y - 2 * (u - 128) * (1 - Kb) * Kb / Kg - 2 * (v - 128) * (1 - Kr) * Kr / Kg;
+						b = y + 2 * (u - 128) * (1 - Kb);
+						r = (r - _totalFloor) * 255 / (256 - 2 * _totalFloor);
+						g = (g - _totalFloor) * 255 / (256 - 2 * _totalFloor);
+						b = (b - _totalFloor) * 255 / (256 - 2 * _totalFloor);
+					}
+					else if (_limitedRange)
 					{
 						r = (255.0 / 219.0) * y + (255.0 / 112) * v * (1 - Kr) - (255.0 * 16.0 / 219 + 255.0 * 128.0 / 112.0 * (1 - Kr));
 						g = (255.0 / 219.0) * y - (255.0 / 112) * u * (1 - Kb) * Kb / Kg - (255.0 / 112.0) * v * (1 - Kr) * Kr / Kg
@@ -1315,7 +1324,16 @@ bool LutCalibrator::finalize(bool fastTrack)
 					uint32_t ind_lutd = LUT_INDEX(y, u, v);
 					double r, g, b;
 
-					if (_limitedRange)
+					if (_limitedRange && _currentCoef == REC_709_LIMITED_COEFS && _totalFloor > 0)
+					{
+						r = y + 2 * (v - 128) * (1 - Kr);
+						g = y - 2 * (u - 128) * (1 - Kb) * Kb / Kg - 2 * (v - 128) * (1 - Kr) * Kr / Kg;
+						b = y + 2 * (u - 128) * (1 - Kb);
+						r = (r - _totalFloor) * 255 / (256 - 2 * _totalFloor);
+						g = (g - _totalFloor) * 255 / (256 - 2 * _totalFloor);
+						b = (b - _totalFloor) * 255 / (256 - 2 * _totalFloor);
+					}
+					else if (_limitedRange)
 					{
 						r = (255.0 / 219.0) * y + (255.0 / 112) * v * (1 - Kr) - (255.0 * 16.0 / 219 + 255.0 * 128.0 / 112.0 * (1 - Kr));
 						g = (255.0 / 219.0) * y - (255.0 / 112) * u * (1 - Kb) * Kb / Kg - (255.0 / 112.0) * v * (1 - Kr) * Kr / Kg
